@@ -1,0 +1,407 @@
+---
+title: "Comparing MCMC and VB in Stan"
+author:
+  name: "Ricard Argelaguet"
+  affiliation: "European Bioinformatics Institute, Cambridge, UK"
+  email: "ricard@ebi.ac.uk"
+date: "`r Sys.Date()`"
+output:
+  BiocStyle::html_document:
+    toc: true
+    code_folding: show
+vignette: >
+  %\VignetteIndexEntry{scRNA}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+# Description
+
+This vignette shows a comparison of the posterior estimates between the MCMC and ADVI (Automatic Differentiation Variational Inference) inference schemes implemented in Stan.  
+
+Code for the stan model was obtained from [here](https://www.cs.helsinki.fi/u/sakaya/tutorial/)
+
+## Load libraries and define general settings and functions
+
+```{r, message=FALSE}
+library(data.table)
+library(purrr)
+library(ggplot2)
+library(ggpubr)
+library(rstan)
+rstan_options(auto_write = TRUE)
+```
+
+```{r}
+opts <- list()
+opts$ntrials <- 25
+```
+
+```{r}
+data_summary <- function(data){
+  mean <- colMeans(data)
+  sd <- apply(data, 2, sd)
+  return(data.table("pred_mean" = mean, "pred_sd" = sd))
+}
+
+extract_summary_statistics <- function(fit, ntrials, params) {
+  lapply(1:ntrials, function(i) {
+    lapply(params, function(j) {
+      data_summary(as.data.frame(extract(fit[[i]])[[j]])) %>% 
+      as.data.table %>%
+      setnames(c("mean","sd")) %>%
+      .[,parameter:=paste0(j,1:.N)] %>%
+      .[,trial:=i]
+    }) %>% rbindlist
+  }) %>% rbindlist
+}
+
+do.scatterplot <- function(dt) {
+  to.plot <- dt %>% dcast(parameter+trial+estimate ~ inference)
+  lims <- c(min(dt$value), max(dt$value))
+  
+  p <- ggscatter(to.plot, x="ADVI", y="MCMC") +
+    facet_wrap(~parameter) +
+    geom_abline(slope=1, intercept=0, linetype="solid") +
+    coord_cartesian(xlim = lims, ylim = lims)
+  p
+}
+```
+
+# Beta binomial
+
+This is the model: 
+
+\begin{align}
+  y &\sim \text{Bin}(N, \theta) \\
+  \theta &\sim \text{Beta}(\alpha, \beta) 
+\end{align}
+
+with associated stan code:
+```{r}
+beta_binomial <- "
+  data {
+    int<lower=1> N;
+    int<lower=1> s;
+    int<lower=0> y[N];
+  }
+  parameters {
+    real<lower=0, upper=1> theta;
+  }
+  model { 
+    theta ~ beta(1,1);
+    for (i in 1:N)
+      y[i] ~ binomial(s,theta);
+  }
+"
+```
+
+We have simulated multiple data sets from the generative model:
+```{r}
+N <- 100  # number of samples
+s <- 10   # number of binomial trials
+
+Y <- list()
+for (i in 1:opts$ntrials) {
+  
+  # Sample theta
+  theta <- runif(1, min=0.1, max=0.9)
+  
+  # Sample binomial observations
+  Y[[i]] <- rbinom(N, s, theta)
+}
+```
+
+The fitting procedure is done as follows (takes a bit of time):
+```{r, eval=FALSE}
+st_model <- stan_model(model_code = beta_binomial, model_name="beta_binomial")
+
+fit.mcmc <- list()
+fit.vb <- list()
+for (i in 1:opts$ntrials) {
+  print(sprintf("Fitting trial %d...",i))
+
+  # Create data object for Stan
+  data <- list(y=Y[[i]], N=N, s=s)
+
+  # Perform inference using HMC sampling
+  fit.mcmc[[i]] <- sampling(st_model,  data = data, chains = 1, iter=3000)
+
+  # Perform inference using ADVI
+  fit.vb[[i]] <- vb(st_model,  data = data, algorithm="meanfield", tol_rel_obj=0.001)
+}
+```
+
+Load pre-computed models fitted with either MCMC or VB:
+```{r, echo=FALSE}
+tmp <- readRDS("/Users/ricard/stan/mcmc_vs_variational/betabinomial/out/fitted_models.rds")
+fit.mcmc <- tmp$MCMC
+fit.vb <- tmp$VB
+```
+
+Extract summary statistics
+```{r}
+dt.mcmc <- extract_summary_statistics(fit.mcmc, ntrials=opts$ntrials, params = "theta") %>%
+  .[,inference:="MCMC"] 
+dt.vb <- extract_summary_statistics(fit.vb, ntrials=opts$ntrials, params = "theta") %>%
+  .[,inference:="ADVI"] 
+
+dt <- rbind(dt.vb, dt.mcmc) %>%
+  melt(id.vars=c("parameter","inference","trial"), variable.name="estimate")
+```
+
+Compare means of the posterior distributions
+```{r, out.width = "120%"}
+do.scatterplot(dt[estimate=="mean"]) +
+  labs(x="Posterior mean (ADVI)", y="Posterior mean (MCMC)")
+```
+
+Compare standard deviation of the posterior distributions
+```{r, out.width = "120%"}
+do.scatterplot(dt[estimate=="sd"]) +
+  labs(x="Posterior stdev DVI)", y="Posterior stdev (MCMC)")
+```
+
+
+
+# Linear regression with ARD priors
+
+This is the model:  
+
+\begin{align}
+  \alpha_{i=1\ldots K} &\sim \text{Gam}(\alpha_0, \beta_0)\\
+  \sigma^2 &\sim \text{InvGam}(\alpha_0, \beta_0) \\
+  \mathbf w &\sim \mathcal{N}(0, \boldsymbol \alpha^{-1} \mathbf I)\\
+  y &\sim \mathcal{N}(\mathbf w^{\top} \mathbf x, \sigma^2)\\
+  K &= \text{number of dimensions} 
+\end{align}
+
+with associated Stan code:
+```{r}
+bayesian_linear_ard <- "
+  data {
+    int<lower=0> N;
+    int<lower=0> D;
+    matrix[N,D] X;
+    vector[N] y;
+  }
+
+  parameters {
+    vector[D] w;
+    vector<lower=0>[D] alpha;
+    real<lower=0> tau;
+  }
+
+  transformed parameters {
+    vector<lower=0>[D] t_alpha;
+    real<lower=0> t_tau;
+    for (d in 1:D) t_alpha[d] = 1/sqrt(alpha[d]);
+    t_tau =  1/sqrt(tau);
+  }
+
+  model {
+    tau ~ gamma(1, 1);
+    alpha ~ gamma(1e-3,1e-3);
+    w ~ normal(0,  t_alpha);
+    y ~ normal(X*w, t_tau);
+  }
+"
+```
+
+
+We have simulated multiple data sets from the generative model:
+```{r}
+N <- 1000  # Number of samples
+D <- 10    # Number of features
+
+Y <- list()
+X <- list()
+for (i in 1:opts$ntrials) {
+
+	# Sample tau
+	tau <- runif(1, min=1, max=3)
+
+	# Sample precision and inactivate some covariates elements
+	alpha <- rep(0.1,D)
+	alpha[sample(c(TRUE,FALSE),size=D, replace=TRUE)] <- 1e6 
+
+	# Sample weights (per feature)
+	W <- sapply(1/sqrt(alpha), function(a) rnorm(1, mean=0, sd=a))
+
+	# Sample covariates
+	X[[i]] <- matrix(rnorm(N*D), N, D)
+
+	# Sample observations and add noise to every sample
+	Y[[i]] <- (X[[i]]%*%W)[,1] + rnorm(N, mean=0, sd = sqrt(1/tau))
+}
+```
+
+The fitting procedure is done as follows (takes a bit of time):
+```{r, eval=FALSE}
+st_model <- stan_model(model_code = bayesian_linear_ard, model_name="bayesian_linear_ard")
+
+fit.mcmc <- list()
+fit.vb <- list()
+for (i in 1:opts$ntrials) {
+  print(sprintf("Fitting trial %d...",i))
+
+  # Create data object for Stan
+  data <- list(N=N, D=D, X=X[[i]], y=Y[[i]])
+
+  # Perform inference using HMC sampling
+  fit.mcmc[[i]] <- sampling(st_model,  data = data, chains = 1, iter=3000)
+
+  # Perform inference using ADVI
+  fit.vb[[i]] <- vb(st_model,  data = data, algorithm="meanfield", tol_rel_obj=0.001)
+}
+```
+
+Load pre-computed models fitted with either MCMC or VB:
+```{r, echo=FALSE}
+tmp <- readRDS("/Users/ricard/stan/mcmc_vs_variational/linear_regression_ard/out/fitted_models.rds")
+fit.mcmc <- tmp$MCMC
+fit.vb <- tmp$VB
+```
+
+Extract summary statistics
+```{r}
+dt.mcmc <- extract_summary_statistics(fit.mcmc, ntrials=opts$ntrials, params = "w") %>%
+  .[,inference:="MCMC"] 
+dt.vb <- extract_summary_statistics(fit.vb, ntrials=opts$ntrials, params = "w") %>%
+  .[,inference:="ADVI"] 
+
+dt <- rbind(dt.vb, dt.mcmc) %>%
+  melt(id.vars=c("parameter","inference","trial"), variable.name="estimate")
+```
+
+Compare means of the posterior distributions
+```{r, out.width = "120%"}
+do.scatterplot(dt[estimate=="mean"]) +
+  labs(x="Posterior mean (ADVI)", y="Posterior mean (MCMC)")
+```
+
+Compare standard deviation of the posterior distributions
+```{r, out.width = "120%"}
+do.scatterplot(dt[estimate=="sd"]) +
+  labs(x="Posterior stdev DVI)", y="Posterior stdev (MCMC)")
+```
+
+
+
+# Logistic regression with ARD priors
+
+This is the model:
+
+\begin{align}
+  \alpha_{i=1\ldots K} &\sim \text{Gam}(\alpha_0, \beta_0)\\
+  \sigma^2 &\sim \text{InvGam}(\alpha_0, \beta_0) \\
+  \mathbf w &\sim \mathcal{N}(0, \boldsymbol \alpha^{-1} \mathbf I)\\
+  y &\sim \mathcal{N}(\mathbf w^{\top} \mathbf x, \sigma^2)
+\end{align}
+
+with associated stan code:
+```{r}
+bayesian_logistic_ard = "
+  data {
+    int<lower=1> N;      // number of samples
+    int<lower=1> D;      // number of covariates
+    int<lower=0,upper=1> y[N];            // binary outcome 
+    matrix[N, D] X;      // covariate matrix
+  }
+  
+  parameters {
+		vector[D] w;
+		vector<lower=0>[D] alpha;
+  }
+  
+	transformed parameters {
+		vector<lower=0>[D] t_alpha;
+		for (d in 1:D) t_alpha[d] = 1/sqrt(alpha[d]);
+	}
+	
+  model {
+		alpha ~ gamma(1e-3,1e-3);
+		w ~ normal(0, t_alpha);
+		y ~ bernoulli_logit(X*w);
+  }
+"
+```
+
+We have simulated multiple data sets from the generative model:
+```{r}
+# Specify dimensions
+N <- 1000  # Number of samples
+D <- 10    # Number of features
+
+Y <- list()
+X <- list()
+for (i in 1:opts$ntrials) {
+  
+  # Sample precision and inactivate some covariates elements
+  alpha <- rep(0.1,D)
+  alpha[sample(c(TRUE,FALSE),size=D, replace=TRUE)] <- 1e6 
+  
+  # Sample weights (per feature)
+  w <- sapply(1/sqrt(alpha), function(a) rnorm(1, mean=0, sd=a))
+  
+  # Sample covariates
+  X[[i]] <- matrix(rnorm(N*D), N, D)
+  
+  # Sample observations and add noise to every sample
+  Y[[i]] <- rbinom(N, 1, boot::inv.logit(c(X[[i]]%*%w + rnorm(N))))
+}
+```
+
+The fitting procedure is done as follows (takes a bit of time):
+```{r, eval=FALSE}
+st_model <- stan_model(model_code = bayesian_logistic_ard, model_name="bayesian_logistic_ard")
+
+fit.mcmc <- list()
+fit.vb <- list()
+for (i in 1:opts$ntrials) {
+  print(sprintf("Fitting trial %d...",i))
+
+  # Create data object for Stan
+  data <- list(N=N, D=D, X=X[[i]], y=Y[[i]])
+
+  # Perform inference using HMC sampling
+  fit.mcmc[[i]] <- sampling(st_model,  data = data, chains = 1, iter=3000)
+
+  # Perform inference using ADVI
+  fit.vb[[i]] <- vb(st_model,  data = data, algorithm="meanfield", tol_rel_obj=0.001)
+}
+```
+
+Load pre-computed models fitted with either MCMC or VB:
+```{r, echo=FALSE}
+tmp <- readRDS("/Users/ricard/stan/mcmc_vs_variational/logistic_regression/out/fitted_models.rds")
+fit.mcmc <- tmp$MCMC
+fit.vb <- tmp$VB
+```
+
+Extract summary statistics
+```{r}
+dt.mcmc <- extract_summary_statistics(fit.mcmc, ntrials=opts$ntrials, params = "w") %>%
+  .[,inference:="MCMC"] 
+dt.vb <- extract_summary_statistics(fit.vb, ntrials=opts$ntrials, params = "w") %>%
+  .[,inference:="ADVI"] 
+
+dt <- rbind(dt.vb, dt.mcmc) %>%
+  melt(id.vars=c("parameter","inference","trial"), variable.name="estimate")
+```
+
+Compare means of the posterior distributions
+```{r, out.width = "120%"}
+do.scatterplot(dt[estimate=="mean"]) +
+  labs(x="Posterior mean (ADVI)", y="Posterior mean (MCMC)")
+```
+
+Compare standard deviation of the posterior distributions
+```{r, out.width = "120%"}
+do.scatterplot(dt[estimate=="sd"]) +
+  labs(x="Posterior stdev DVI)", y="Posterior stdev (MCMC)")
+```
+
+# Conclusion
+As expected, the expectations are very well captured with variational inference. The variance estimates are ok for the linear models but a bit far off for the non-linear model, particularly for posterior distributions with higher uncertainity. This is consistent with the knowledge that VB tends to underestimate the true variance.
+

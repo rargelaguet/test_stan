@@ -1,7 +1,3 @@
-###################
-## Beta binomial ##
-###################
-
 beta_binomial <- "
   data {
     int<lower=1> N;

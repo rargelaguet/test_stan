@@ -15,9 +15,13 @@ rstan_options(auto_write = TRUE)
 io <- list()
 io$basedir <- "/Users/ricard/stan/mcmc_vs_variational/betabinomial"
 io$model <- paste0(io$basedir,"/model.R")
+io$outdir <- paste0(io$basedir,"/out"); dir.create(io$outdir)
 
 ## Options ##
 opts <- list()
+
+# Number of trials
+opts$ntrials <- 25
 
 # Number of cores
 opts$cores <- 2
@@ -38,7 +42,6 @@ source(paste0(io$basedir,"/load_data.R"))
 # Utils
 source("/Users/ricard/stan/mcmc_vs_variational/utils.R")
 
-
 #########################
 ## Fit Bayesian models ##
 #########################
@@ -46,106 +49,88 @@ source("/Users/ricard/stan/mcmc_vs_variational/utils.R")
 # Create stan model
 st_model <- stan_model(model_code = beta_binomial, model_name="beta_binomial")
 
-# Create data object for Stan
-data <- list(y=y, N=N, s = s)
+fit.mcmc <- list()
+fit.vb <- list()
+for (i in 1:opts$ntrials) {
+  
+  # Create data object for Stan
+  data <- list(y=Y[[i]], N=N, s=s)
+  
+  # Perform inference using HMC sampling
+  fit.mcmc[[i]] <- sampling(st_model,  data = data, chains = 1, iter=3000)
+  
+  # Perform inference using ADVI
+  fit.vb[[i]] <- vb(st_model,  data = data, algorithm="meanfield", tol_rel_obj=0.001)
+  
+}
 
-# Perform inference using HMC sampling
-fit.mcmc <- sampling(st_model,  data = data, chains = 1, iter=1000)
+##################
+## Save results ##
+##################
 
-# Perform inference using ADVI
-fit.vb <- vb(st_model,  data = data)
+io$outfile <- paste0(io$outdir,"/fitted_models.rds")
+saveRDS(list("MCMC"=fit.mcmc, "VB"=fit.vb), io$outfile)
 
+stop()
+
+###############################
+## Load pre-computed results ##
+###############################
+
+# tmp <- readRDS(io$outfile)
+# fit.mcmc <- tmp$MCMC
+# fit.vb <- tmp$VB
 
 ################################
 ## Compare summary statistics ##
 ################################
 
-# theta <- mean(extract(samples)$theta)
+params <- c("theta")
 
 # MCMC: Extract summary statistics for the posterior distributions
-dt.mcmc <- data_summary(as.data.frame(extract(fit.mcmc)["theta"])) %>%
-  setnames(c("mean","sd") ) %>%
-  .[,parameter:="theta"] %>%
-  .[,inference:="MCMC"]
+dt.mcmc <- lapply(1:opts$ntrials, function(i) {
+  lapply(params, function(j) {
+    data_summary(as.data.frame(extract(fit.mcmc[[i]])[[j]])) %>% 
+      as.data.table %>%
+      setnames(c("mean","sd")) %>%
+      .[,parameter:=paste0(j,1:.N)] %>%
+      .[,inference:="MCMC"] %>%
+      .[,trial:=i]
+  }) %>% rbindlist
+}) %>% rbindlist
 
 # VI: Extract summary statistics for the posterior distributions
-dt.vb <- data_summary(as.data.frame(extract(fit.vb)["theta"])) %>%
-  setnames(c("mean","sd") ) %>%
-  .[,parameter:="theta"] %>%
-  .[,inference:="ADVI"]
+dt.vb <- lapply(1:opts$ntrials, function(i) {
+  lapply(params, function(j) {
+    data_summary(as.data.frame(extract(fit.vb[[i]])[[j]])) %>% 
+      as.data.table %>%
+      setnames(c("mean","sd")) %>%
+      .[,parameter:=paste0(j,1:.N)] %>%
+      .[,inference:="ADVI"] %>%
+      .[,trial:=i]
+  }) %>% rbindlist
+}) %>% rbindlist
 
-to.plot <- rbind(dt.vb, dt.mcmc) %>%
-  melt(id.vars=c("parameter","inference"), variable.name="estimate")
+dt <- rbind(dt.vb, dt.mcmc) %>%
+  melt(id.vars=c("parameter","inference","trial"), variable.name="estimate")
 
-stop()
+##########
+## Plot ##
+##########
 
+to.plot <- dt %>% dcast(parameter+trial+estimate ~ inference)
 
-###############
-## STOP HERE ##
-###############
-
-# mu
-p1 <- ggscatter(to.plot, x="mu.mean.variational", y="mu.mean.mcmc") +
-  labs(x="mean of mu (variational)", y="mean of mu (MCMC)") +
+# posterior mean
+p1 <- ggscatter(to.plot[estimate=="mean"], x="ADVI", y="MCMC") +
+  facet_wrap(~parameter) +
+  labs(x="Posterior mean (ADVI)", y="Posterior mean (MCMC)") +
   geom_abline(slope=1, intercept=0, linetype="solid")
+p1
 
-p2 <- ggscatter(out, x="mu.sd.variational", y="mu.sd.mcmc") +
-  labs(x="sd of mu (variational)", y="sd of mu (MCMC)") +
+
+# posterior sd
+p1 <- ggscatter(to.plot[estimate=="sd"], x="ADVI", y="MCMC") +
+  facet_wrap(~parameter) +
+  labs(x="Posterior sd (ADVI)", y="Posterior sd (MCMC)") +
   geom_abline(slope=1, intercept=0, linetype="solid")
-
-# gamma
-p3 <- ggscatter(out, x="gamma.mean.variational", y="gamma.mean.mcmc") +
-  labs(x="mean of gamma (variational)", y="mean of gamma (MCMC)") +
-  geom_abline(slope=1, intercept=0, linetype="solid")
-
-p4 <- ggscatter(out, x="gamma.sd.variational", y="gamma.sd.mcmc") +
-  labs(x="sd of gamma (variational)", y="sd of gamma (MCMC)") +
-  geom_abline(slope=1, intercept=0, linetype="solid")
-
-cowplot::plot_grid(plotlist=list(p1,p2,p3,p4), nrow=2)
-
-###########################
-## Compare distributions ##
-###########################
-
-# mu
-
-variational <- rstan::extract(stan.models[[i]][["variational"]])[["mu"]] %>%
-  as.data.frame %>% tibble::rownames_to_column("iteration") %>%
-  as.data.table %>% melt(id.vars="iteration", variable.name="id") %>%
-  .[,inference:="variational"]
-
-mcmc <- rstan::extract(stan.models[[i]][["mcmc"]])[["mu"]] %>%
-  as.data.frame %>% tibble::rownames_to_column("iteration") %>%
-  as.data.table %>% melt(id.vars="iteration", variable.name="id") %>%
-  .[,inference:="mcmc"]
-
-to.plot <- rbind(variational,mcmc) %>%
-  .[iteration>10] %>%
-  .[id%in%paste0("V",1:6)]
-
-ggdensity(to.plot, x="value", y="..density..", fill="inference", color="black") +
-  labs(x="", y="Density") +
-  facet_wrap(~id, scales="free")
-
-
-# gamma
-
-variational <- rstan::extract(stan.models[[i]][["variational"]])[["gamma"]] %>%
-  as.data.frame %>% tibble::rownames_to_column("iteration") %>%
-  as.data.table %>% melt(id.vars="iteration", variable.name="id") %>%
-  .[,inference:="variational"]
-
-mcmc <- rstan::extract(stan.models[[i]][["mcmc"]])[["gamma"]] %>%
-  as.data.frame %>% tibble::rownames_to_column("iteration") %>%
-  as.data.table %>% melt(id.vars="iteration", variable.name="id") %>%
-  .[,inference:="mcmc"]
-
-to.plot <- rbind(variational,mcmc) %>%
-  .[iteration>10] %>%
-  .[id%in%paste0("V",1:6)]
-
-ggdensity(to.plot, x="value", y="..density..", fill="inference", color="black") +
-  labs(x="gamma", y="Density") +
-  facet_wrap(~id, scales="free")
-  
+p1

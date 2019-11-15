@@ -1,49 +1,28 @@
-#######################################################
-## Logistic regression model with a single covariate ##
-#######################################################
+############################################
+## Multivaritae logistic regression model ##
+############################################
 
-# WHERE IS THE PRIOR FOR BETA?
-# WHY THIS PRIOR ON ALPHA?
-# logistic = "
-# data {
-#   int N;      // number of samples
-#   int y[N];   // binary outcome for item n
-#   real x[N];  // predictive feature for item n
-# }
-# 
-# parameters {
-#   real alpha;  // intercept
-#   real beta;  // slope
-# }
-# 
-# model {
-#   alpha ~ normal(0,5);  // weakly informative
-#   for (n in 1:N)
-#     y[n] ~ bernoulli(inv_logit(alpha + beta * x[n]));
-# }
-# "
-
-# WHERE IS THE NOISE?
-# ADD ARD PRIOR
-logistic = "
+bayesian_logistic_ard = "
   data {
     int<lower=1> N;      // number of samples
     int<lower=1> D;      // number of covariates
-    int y[N];            // binary outcome 
+    int<lower=0,upper=1> y[N];            // binary outcome 
     matrix[N, D] X;      // covariate matrix
   }
   
   parameters {
-    real alpha;  // intercept
-    vector[D] beta;  // slope
+		vector[D] w;
+		vector<lower=0>[D] alpha;
   }
-
+  
+	transformed parameters {
+		vector<lower=0>[D] t_alpha;
+		for (d in 1:D) t_alpha[d] = 1/sqrt(alpha[d]);
+	}
+	
   model {
-    alpha ~ normal(1,100);  //  uninformative
-    for (d in 1:D) {
-      beta[d] ~ normal(1,100);  //  uninformative
-    }
-    for (n in 1:N)
-      y[n] ~ bernoulli(inv_logit(alpha + X[n]*beta));
+		alpha ~ gamma(1e-3,1e-3);
+		w ~ normal(0, t_alpha);
+		y ~ bernoulli_logit(X*w);
   }
 "

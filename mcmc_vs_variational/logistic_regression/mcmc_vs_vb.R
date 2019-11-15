@@ -1,3 +1,7 @@
+############################################
+## Multivaritae logistic regression model ##
+############################################
+
 library(data.table)
 library(purrr)
 library(ggplot2)
@@ -5,13 +9,7 @@ library(ggpubr)
 library(rstan)
 rstan_options(auto_write = TRUE)
 
-
-
-# data_summary <- function(data){
-#   mean <- colMeans(data)
-#   sd <- apply(data, 2, sd)
-#   return(data.table("pred_mean" = mean, "pred_sd" = sd))
-# }
+# https://www.cs.helsinki.fi/u/sakaya/tutorial
 
 ######################
 ## Define settings  ##
@@ -21,18 +19,19 @@ rstan_options(auto_write = TRUE)
 io <- list()
 io$basedir <- "/Users/ricard/stan/mcmc_vs_variational/logistic_regression"
 io$model <- paste0(io$basedir,"/model.R")
+io$outdir <- paste0(io$basedir,"/out"); dir.create(io$outdir)
 
 ## Options ##
 opts <- list()
 
+# Number of trials
+opts$ntrials <- 25
+
 # Number of cores
 opts$cores <- 2
-# options(mc.cores = parallel::detectCores())
 options(mc.cores = opts$cores)
 
-# Initialisation for alpha (intercept) and beta (slope)
-# opts$alpha <- 1
-# opts$beta <- 1
+# (TO-DO) Initialisation 
 
 ###############
 ## Load data ##
@@ -48,77 +47,104 @@ source(paste0(io$basedir,"/load_data.R"))
 source("/Users/ricard/stan/mcmc_vs_variational/utils.R")
 
 
-##################################
-## Fit Maximum Likelihood model ##
-##################################
-
-glm.fit <- glm(Direction ~ Lag1 + Lag2 + Lag3 + Lag4 + Lag5 + Volume, data = Smarket, family = binomial)
-
-summary(glm.fit)$coefficients
-
 #########################
 ## Fit Bayesian models ##
 #########################
 
 # Create stan model
-st_model <- stan_model(model_code = logistic, model_name="logistic_regression")
+st_model <- stan_model(model_code = bayesian_logistic_ard, model_name="bayesian_logistic_ard")
 
-# Create data object for Stan
-# dat <- list(N = nrow(X), D=ncol(X), X = X, y = as.numeric(y)-1, alpha = opts$alpha, beta = opts$beta)
-dat <- list(N = nrow(X), D=ncol(X), X = X, y = as.numeric(y)-1)
+fit.mcmc <- list()
+fit.vb <- list()
+for (i in 1:opts$ntrials) {
+  print(sprintf("Fitting trial %d...",i))
 
-# Perform inference using HMC sampling
-fit.mcmc <- sampling(st_model,  data = dat, chains = 1, iter=500)
+  # Create data object for Stan
+  data <- list(N=N, D=D, X=X[[i]], y=Y[[i]])
 
-# Perform inference using ADVI
-fit.vb <- vb(st_model,  data = dat)
+  # Perform inference using HMC sampling
+  fit.mcmc[[i]] <- sampling(st_model,  data = data, chains = 1, iter=3000)
 
+  # Perform inference using ADVI
+  fit.vb[[i]] <- vb(st_model,  data = data, algorithm="meanfield", tol_rel_obj=0.001)
+
+}
+
+##################
+## Save results ##
+##################
+
+io$outfile <- paste0(io$outdir,"/fitted_models.rds")
+saveRDS(list("MCMC"=fit.mcmc, "VB"=fit.vb), io$outfile)
+
+stop()
+
+###############################
+## Load pre-computed results ##
+###############################
+
+# tmp <- readRDS(io$outfile)
+# fit.mcmc <- tmp$MCMC
+# fit.vb <- tmp$VB
 
 ################################
 ## Compare summary statistics ##
 ################################
 
+params <- c("w")
+
 # MCMC: Extract summary statistics for the posterior distributions
-dt.mcmc <- data_summary(do.call("cbind", extract(fit.mcmc)[c("alpha","beta")])) %>%
-  setnames(c("mean","sd") ) %>%
-  .[,parameter:=c("alpha",paste0("beta",1:ncol(X)))] %>%
-  .[,inference:="MCMC"]
+dt.mcmc <- lapply(1:opts$ntrials, function(i) {
+  lapply(params, function(j) {
+    data_summary(as.data.frame(extract(fit.mcmc[[i]])[[j]])) %>% 
+    as.data.table %>%
+    setnames(c("mean","sd")) %>%
+    .[,parameter:=paste0(j,1:.N)] %>%
+    .[,inference:="MCMC"] %>%
+    .[,trial:=i]
+  }) %>% rbindlist
+}) %>% rbindlist
 
 # VI: Extract summary statistics for the posterior distributions
-dt.vb <- data_summary(do.call("cbind", extract(fit.vb)[c("alpha","beta")])) %>%
-  setnames(c("mean","sd") ) %>%
-  .[,parameter:=c("alpha",paste0("beta",1:ncol(X)))] %>%
-  .[,inference:="ADVI"]
+dt.vb <- lapply(1:opts$ntrials, function(i) {
+  lapply(params, function(j) {
+    data_summary(as.data.frame(extract(fit.vb[[i]])[[j]])) %>% 
+    as.data.table %>%
+    setnames(c("mean","sd")) %>%
+    .[,parameter:=paste0(j,1:.N)] %>%
+    .[,inference:="ADVI"] %>%
+    .[,trial:=i]
+  }) %>% rbindlist
+}) %>% rbindlist
 
 to.plot <- rbind(dt.vb, dt.mcmc) %>%
-  melt(id.vars=c("parameter","inference"), variable.name="estimate")
+  melt(id.vars=c("parameter","inference","trial"), variable.name="estimate") %>%
+  dcast(parameter+trial+estimate ~ inference)
+
+# plot comparison of posterior means
+p1 <- ggscatter(to.plot[estimate=="mean"], x="ADVI", y="MCMC") +
+  facet_wrap(~parameter) +
+  labs(x="Posterior mean (ADVI)", y="Posterior mean (MCMC)") +
+  geom_abline(slope=1, intercept=0, linetype="solid")
+p1
+
+# plot comparison of posterior sd
+p1 <- ggscatter(to.plot[estimate=="sd"], x="ADVI", y="MCMC") +
+  facet_wrap(~parameter) +
+  labs(x="Posterior sd (ADVI)", y="Posterior sd (MCMC)") +
+  geom_abline(slope=1, intercept=0, linetype="solid")
+p1
+
+# cowplot::plot_grid(plotlist=list(p1,p2,p3,p4), nrow=2)
 
 stop()
 
 
-###############
-## STOP HERE ##
-###############
 
-# mu
-p1 <- ggscatter(to.plot, x="mu.mean.variational", y="mu.mean.mcmc") +
-  labs(x="mean of mu (variational)", y="mean of mu (MCMC)") +
-  geom_abline(slope=1, intercept=0, linetype="solid")
 
-p2 <- ggscatter(out, x="mu.sd.variational", y="mu.sd.mcmc") +
-  labs(x="sd of mu (variational)", y="sd of mu (MCMC)") +
-  geom_abline(slope=1, intercept=0, linetype="solid")
 
-# gamma
-p3 <- ggscatter(out, x="gamma.mean.variational", y="gamma.mean.mcmc") +
-  labs(x="mean of gamma (variational)", y="mean of gamma (MCMC)") +
-  geom_abline(slope=1, intercept=0, linetype="solid")
 
-p4 <- ggscatter(out, x="gamma.sd.variational", y="gamma.sd.mcmc") +
-  labs(x="sd of gamma (variational)", y="sd of gamma (MCMC)") +
-  geom_abline(slope=1, intercept=0, linetype="solid")
 
-cowplot::plot_grid(plotlist=list(p1,p2,p3,p4), nrow=2)
 
 ###########################
 ## Compare distributions ##

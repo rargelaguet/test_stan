@@ -22,7 +22,6 @@
 *.zip
 
 # output files
-*.html
 *.log
 *.tsv
 
