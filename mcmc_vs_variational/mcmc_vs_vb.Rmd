@@ -33,8 +33,7 @@ rstan_options(auto_write = TRUE)
 ```
 
 ```{r}
-opts <- list()
-opts$ntrials <- 25
+ntrials <- 25
 ```
 
 ```{r}
@@ -102,7 +101,7 @@ N <- 100  # number of samples
 s <- 10   # number of binomial trials
 
 Y <- list()
-for (i in 1:opts$ntrials) {
+for (i in 1:ntrials) {
   
   # Sample theta
   theta <- runif(1, min=0.1, max=0.9)
@@ -118,7 +117,7 @@ st_model <- stan_model(model_code = beta_binomial, model_name="beta_binomial")
 
 fit.mcmc <- list()
 fit.vb <- list()
-for (i in 1:opts$ntrials) {
+for (i in 1:ntrials) {
   print(sprintf("Fitting trial %d...",i))
 
   # Create data object for Stan
@@ -132,7 +131,7 @@ for (i in 1:opts$ntrials) {
 }
 ```
 
-Load pre-computed models fitted with either MCMC or VB:
+<!-- Load pre-computed models fitted with either MCMC or VB: -->
 ```{r, echo=FALSE}
 tmp <- readRDS("/Users/ricard/stan/mcmc_vs_variational/betabinomial/out/fitted_models.rds")
 fit.mcmc <- tmp$MCMC
@@ -141,9 +140,9 @@ fit.vb <- tmp$VB
 
 Extract summary statistics
 ```{r}
-dt.mcmc <- extract_summary_statistics(fit.mcmc, ntrials=opts$ntrials, params = "theta") %>%
+dt.mcmc <- extract_summary_statistics(fit.mcmc, ntrials=ntrials, params = "theta") %>%
   .[,inference:="MCMC"] 
-dt.vb <- extract_summary_statistics(fit.vb, ntrials=opts$ntrials, params = "theta") %>%
+dt.vb <- extract_summary_statistics(fit.vb, ntrials=ntrials, params = "theta") %>%
   .[,inference:="ADVI"] 
 
 dt <- rbind(dt.vb, dt.mcmc) %>%
@@ -216,7 +215,7 @@ D <- 10    # Number of features
 
 Y <- list()
 X <- list()
-for (i in 1:opts$ntrials) {
+for (i in 1:ntrials) {
 
 	# Sample tau
 	tau <- runif(1, min=1, max=3)
@@ -242,7 +241,7 @@ st_model <- stan_model(model_code = bayesian_linear_ard, model_name="bayesian_li
 
 fit.mcmc <- list()
 fit.vb <- list()
-for (i in 1:opts$ntrials) {
+for (i in 1:ntrials) {
   print(sprintf("Fitting trial %d...",i))
 
   # Create data object for Stan
@@ -256,7 +255,7 @@ for (i in 1:opts$ntrials) {
 }
 ```
 
-Load pre-computed models fitted with either MCMC or VB:
+<!-- Load pre-computed models fitted with either MCMC or VB: -->
 ```{r, echo=FALSE}
 tmp <- readRDS("/Users/ricard/stan/mcmc_vs_variational/linear_regression_ard/out/fitted_models.rds")
 fit.mcmc <- tmp$MCMC
@@ -265,9 +264,9 @@ fit.vb <- tmp$VB
 
 Extract summary statistics
 ```{r}
-dt.mcmc <- extract_summary_statistics(fit.mcmc, ntrials=opts$ntrials, params = "w") %>%
+dt.mcmc <- extract_summary_statistics(fit.mcmc, ntrials=ntrials, params = "w") %>%
   .[,inference:="MCMC"] 
-dt.vb <- extract_summary_statistics(fit.vb, ntrials=opts$ntrials, params = "w") %>%
+dt.vb <- extract_summary_statistics(fit.vb, ntrials=ntrials, params = "w") %>%
   .[,inference:="ADVI"] 
 
 dt <- rbind(dt.vb, dt.mcmc) %>%
@@ -335,7 +334,7 @@ D <- 10    # Number of features
 
 Y <- list()
 X <- list()
-for (i in 1:opts$ntrials) {
+for (i in 1:ntrials) {
   
   # Sample precision and inactivate some covariates elements
   alpha <- rep(0.1,D)
@@ -358,7 +357,7 @@ st_model <- stan_model(model_code = bayesian_logistic_ard, model_name="bayesian_
 
 fit.mcmc <- list()
 fit.vb <- list()
-for (i in 1:opts$ntrials) {
+for (i in 1:ntrials) {
   print(sprintf("Fitting trial %d...",i))
 
   # Create data object for Stan
@@ -372,7 +371,7 @@ for (i in 1:opts$ntrials) {
 }
 ```
 
-Load pre-computed models fitted with either MCMC or VB:
+<!-- Load pre-computed models fitted with either MCMC or VB: -->
 ```{r, echo=FALSE}
 tmp <- readRDS("/Users/ricard/stan/mcmc_vs_variational/logistic_regression/out/fitted_models.rds")
 fit.mcmc <- tmp$MCMC
@@ -381,9 +380,9 @@ fit.vb <- tmp$VB
 
 Extract summary statistics
 ```{r}
-dt.mcmc <- extract_summary_statistics(fit.mcmc, ntrials=opts$ntrials, params = "w") %>%
+dt.mcmc <- extract_summary_statistics(fit.mcmc, ntrials=ntrials, params = "w") %>%
   .[,inference:="MCMC"] 
-dt.vb <- extract_summary_statistics(fit.vb, ntrials=opts$ntrials, params = "w") %>%
+dt.vb <- extract_summary_statistics(fit.vb, ntrials=ntrials, params = "w") %>%
   .[,inference:="ADVI"] 
 
 dt <- rbind(dt.vb, dt.mcmc) %>%
@@ -404,4 +403,10 @@ do.scatterplot(dt[estimate=="sd"]) +
 
 # Conclusion
 As expected, the expectations are very well captured with variational inference. The variance estimates are ok for the linear models but a bit far off for the non-linear model, particularly for posterior distributions with higher uncertainity. This is consistent with the knowledge that VB tends to underestimate the true variance.
+
+
+# sessionInfo
+```{r}
+sessionInfo()
+```
 
